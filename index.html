@@ -317,48 +317,164 @@ async function createRoom(){
  toast('No se pudo generar un código libre. Inténtalo otra vez.');
 }
 async function joinRoom(){
- if(!navigator.onLine){toast('No hay conexión a Internet. No se ha consultado Firebase.');return;}
- if(!user){toast('La sesión anónima aún no está lista. Recarga la página e inténtalo de nuevo.');return;}
+ if(!navigator.onLine){
+  toast('No hay conexión a Internet. No se ha consultado Firebase.');
+  return;
+ }
+ if(!user){
+  toast('La sesión anónima aún no está lista. Recarga la página e inténtalo de nuevo.');
+  return;
+ }
+
  const code=$('roomCodeInput').value.replace(/\s+/g,'').toUpperCase();
- if(!/^[A-HJ-NP-Z2-9]{6}$/.test(code)){toast('Introduce un código válido de seis caracteres.');return;}
+
+ if(!/^[A-HJ-NP-Z2-9]{6}$/.test(code)){
+  toast('Introduce un código válido de seis caracteres.');
+  return;
+ }
+
  const r=ref(db,`rooms/${code}`);
+ const uid=myUid();
+ let abortReason='No se identificó el motivo';
+
  try{
-  // Primera lectura separada: permite distinguir sala inexistente, sala ocupada y estado incorrecto.
   const before=await get(r);
-  if(!before.exists()){toast('Sala no encontrada: no existe ningún registro en /rooms/'+code+'. Comprueba el código compartido.');return;}
-  const initial=before.val();
-  if(initial?.status!=='waiting'){
-   toast('La sala existe, pero ya no está esperando jugadores (estado: '+String(initial?.status||'desconocido')+').');return;
-  }
-  if(initial?.players?.p2 && initial.players.p2.uid!==myUid()){
-   toast('La sala existe, pero ya está completa. Puedes crear una nueva sala.');return;
-  }
-  const result=await runTransaction(r,current=>{
-   if(!current||current.status!=='waiting')return;
-   if(current.players?.p1?.uid===myUid()||current.players?.p2?.uid===myUid())return current;
-   if(current.players?.p2)return;
-   current.players=current.players||{};
-   current.players.p2={uid:myUid(),name:nameValue(),score:0};
-   return current;
-  },{applyLocally:false});
-  if(!result.committed){
-   const after=await get(r);
-   if(!after.exists()){toast('La sala desapareció durante el intento de unión.');return;}
-   const data=after.val();
-   if(data?.status!=='waiting')toast('La sala existe, pero la partida ya comenzó o terminó (estado: '+String(data?.status||'desconocido')+').');
-   else if(data?.players?.p2&&data.players.p2.uid!==myUid())toast('La sala se llenó mientras intentabas entrar.');
-   else toast('Firebase encontró la sala, pero no confirmó la unión. Revisa las reglas de escritura de /rooms/'+code+'.');
+
+  if(!before.exists()){
+   toast('Sala no encontrada: comprueba el código compartido.');
    return;
   }
-  roomCode=code;const data=result.snapshot.val();
-  mySlot=data.players?.p1?.uid===myUid()?'p1':data.players?.p2?.uid===myUid()?'p2':null;
-  if(!mySlot){toast('Firebase guardó la operación, pero no se pudo identificar tu puesto.');return;}
-  room=data;localStorage.setItem(localKey,code);await activatePresence();listenRoom();
+
+  const initial=before.val();
+
+  if(initial?.status!=='waiting'){
+   toast('La sala existe, pero ya no está esperando jugadores.');
+   return;
+  }
+
+  const initialP2Uid=initial?.players?.p2?.uid;
+
+  if(initialP2Uid && initialP2Uid!==uid){
+   toast('La sala existe, pero ya está completa.');
+   return;
+  }
+
+  const result=await runTransaction(r,current=>{
+   abortReason='';
+
+   if(!current){
+    abortReason='La sala desapareció durante la unión.';
+    return;
+   }
+
+   if(current.status!=='waiting'){
+    abortReason='La sala ya no está esperando jugadores.';
+    return;
+   }
+
+   if(current.players?.p1?.uid===uid){
+    return current;
+   }
+
+   if(current.players?.p2?.uid===uid){
+    return current;
+   }
+
+   const p2Uid=current.players?.p2?.uid;
+
+   if(p2Uid && p2Uid!==uid){
+    abortReason='Otro jugador ocupó el puesto p2.';
+    return;
+   }
+
+   return {
+    ...current,
+    players:{
+     ...(current.players||{}),
+     p2:{
+      uid:uid,
+      name:nameValue(),
+      score:0
+     }
+    }
+   };
+  },{applyLocally:false});
+
+  if(!result.committed){
+   const after=await get(r);
+
+   if(!after.exists()){
+    toast('La sala desapareció durante el intento de unión.');
+    return;
+   }
+
+   const data=after.val();
+
+   if(data?.players?.p1?.uid===uid){
+    roomCode=code;
+    mySlot='p1';
+    room=data;
+    localStorage.setItem(localKey,code);
+    await activatePresence();
+    listenRoom();
+    return;
+   }
+
+   if(data?.players?.p2?.uid===uid){
+    roomCode=code;
+    mySlot='p2';
+    room=data;
+    localStorage.setItem(localKey,code);
+    await activatePresence();
+    listenRoom();
+    return;
+   }
+
+   if(data?.status!=='waiting'){
+    toast('La partida ya no está esperando jugadores.');
+   }else if(data?.players?.p2?.uid){
+    toast('La sala se llenó mientras intentabas entrar.');
+   }else{
+    console.error('Unión cancelada:',{
+     code,
+     uid,
+     abortReason,
+     room:data
+    });
+
+    toast('No se pudo completar la unión: '+(abortReason||'la transacción fue cancelada. Revisa la consola.'));
+   }
+   return;
+  }
+
+  const data=result.snapshot.val();
+
+  roomCode=code;
+  mySlot=data.players?.p1?.uid===uid?'p1':
+         data.players?.p2?.uid===uid?'p2':null;
+
+  if(!mySlot){
+   toast('La operación terminó, pero no se pudo identificar tu puesto.');
+   return;
+  }
+
+  room=data;
+  localStorage.setItem(localKey,code);
+  await activatePresence();
+  listenRoom();
+
  }catch(e){
-  console.error('joinRoom failed', {code,path:`rooms/${code}`,uid:myUid(),error:e});
+  console.error('joinRoom failed',{
+   code,
+   path:`rooms/${code}`,
+   uid,
+   error:e
+  });
+
   toast(errorText(e));
  }
 }
+
 async function resumeRoom(){
  const code=localStorage.getItem(localKey);if(!code||!user)return;
  try{const snap=await get(ref(db,`rooms/${code}`));if(!snap.exists()){localStorage.removeItem(localKey);return;}const data=snap.val();const slot=data.players?.p1?.uid===myUid()?'p1':data.players?.p2?.uid===myUid()?'p2':null;if(!slot){localStorage.removeItem(localKey);return;}roomCode=code;mySlot=slot;room=data;await activatePresence();listenRoom();}
