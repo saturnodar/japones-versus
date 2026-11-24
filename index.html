@@ -362,10 +362,9 @@ async function joinRoom(){
   const result=await runTransaction(r,current=>{
    abortReason='';
 
-   if(!current){
-    abortReason='La sala desapareció durante la unión.';
-    return;
-   }
+  if(!current){
+ current=initial;
+}
 
    if(current.status!=='waiting'){
     abortReason='La sala ya no está esperando jugadores.';
